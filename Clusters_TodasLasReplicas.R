@@ -1,6 +1,8 @@
 library(tidyverse)
 library(DropletUtils)
 library(Seurat)
+library(SeuratWrappers)
+library(Rmagic)
 library(Matrix)
 library(scales)
 library(rjson)
@@ -9,6 +11,13 @@ library(DT)
 library(data.table)
 library(ComplexHeatmap)
 library(circlize)
+library(dplyr)
+library(ggplot2)
+library(clusterProfiler)
+library(ReactomePA)
+library(KEGGREST)
+library(org.Dm.eg.db)
+library(openxlsx)
 
 rep1 <- fread("DatosCrudos/Rep1.txt", sep = "\t")
 rep2 <- fread("DatosCrudos/Rep2.txt", sep = "\t")
@@ -43,6 +52,7 @@ dim(total_filt)
 #Búsqueda genes a chequear----
 Presentan_5HT1A <- total_filt[
   total_filt[, "5-HT1A"] > 0, ] #Hay 34
+tabla_resultado <- Presentan_5HT1A[, c("5-HT1A"), drop = FALSE]
 
 Presentan_5HT1B <- total_filt[
   total_filt[, "5-HT1B"] > 0, ] #Hay 201
@@ -59,6 +69,26 @@ Presentan_Tg <- total_filt[
 Presentan_Ddc <- total_filt[
   total_filt[, "Ddc"] > 0, ] #Hay 2133
 
+Presentan_TH <- total_filt[
+  total_filt[, "dth"] > 0, ] #No se encontraron
+
+Presentan_I <- total_filt[
+  total_filt[, "numb"] > 0, ]
+
+Poblacion_control <- total_filt[
+  total_filt[, "dome"] > 0 & 
+  total_filt[, "Tep4"] > 0 &
+  total_filt[, "Hml"] > 0,
+]
+tabla_resultado <- Poblacion_control[, c("dome", "Tep4", "Hml"), drop = FALSE]
+tabla_ordenada <- tabla_resultado[order(-tabla_resultado$dome), ]
+
+p10_Hml <- quantile(total_filt[, "Hml"], 0.10)
+
+Poblacion_a_estudiar <- total_filt[
+  total_filt[, "dome"] > 0 &
+    total_filt[, "Tep4"] > 0 &
+    total_filt[, "Hml"] <= p10_Hml, ]
 
 
 #Caracterización de las poblaciones----
@@ -111,14 +141,16 @@ marc_PLs <- c("NimC1") #Principalmente en cluster 2
 marc_CCs <- c("PPO2", "PPO1", "lz", "peb")  #Cluster 4
 
 #Búsqueda de genes en el cluster
-FeaturePlot(total_seurat, 
+DiagramaGenes <- FeaturePlot(total_seurat, 
             reduction = "tsne", 
-            features = "Ddc",
+            features = "dome",
             pt.size = 0.4, 
             order = TRUE,
-            #split.by = "orig.ident",
             min.cutoff = 'q10',
             label = FALSE)
+
+summary(FetchData(total_seurat, vars = "PPO1"))
+DiagramaGenes + scale_colour_gradientn(colours = c("lightgray", "darkgreen", "red"))
 
 #Genes a chequear: 5-HT1A; 5-HT1B; 5-HT2A; 5-HT2B (no encontrado); 5-HT7; Thrn (no encontrado)
 # Hn (no encontrado); SerT (no encontrado); Tg; Ddc
@@ -129,7 +161,8 @@ heatmap_marcadores_clusters <- DoHeatmap(total_seurat, features = hallmark_genes
 
 ggsave("heatmap_marcadores_clusters_TodasLasReplicas.png", plot = heatmap_marcadores_clusters, width = 10, height = 8)
 
-#Prueba Heatmap más prolijo
+
+#Prueba Heatmap más prolijo----
 genes_disponibles <- rownames(GetAssayData(total_seurat, slot = "scale.data"))
 hallmark_genes_filtrados <- intersect(hallmark_genes, genes_disponibles)
 mat <- GetAssayData(total_seurat, slot = "scale.data")[hallmark_genes_filtrados, ]
@@ -174,6 +207,108 @@ png("heatmap_marcadores_clusters_TodasLasReplicas_nombradas.png", width = 10, he
 draw(heatmap_nombrado)
 dev.off()
 
+
+#Correlación en el patrón de expresión de distintos genes----
+#Calculo la expresión de todos, y luego correlaciono los que me interesen
+
+#Genes correlacionados a lz
+avg_expr_all <- AverageExpression(total_seurat, return.seurat = FALSE, slot = "data")
+head(avg_expr_all$RNA)
+lz_profile <- avg_expr_all$RNA["lz", ]
+correlacion_lz <- apply(avg_expr_all$RNA, 1, function(x) cor(x, lz_profile, method = "pearson"))
+similar_genes <- sort(correlacion_lz, decreasing = TRUE)
+
+genes_correlacionados_lz <- correlacion_lz[correlacion_lz >= 0.95]
+tabla_genes_correlacionados <- data.frame(SYMBOL = names(genes_correlacionados_lz),Correlacion = as.numeric(genes_correlacionados_lz))
+tabla_genes_correlacionados <- tabla_genes_correlacionados[order(-tabla_genes_correlacionados$Correlacion), ]
+
+write.xlsx(tabla_genes_correlacionados, file = "tabla_genes_correlacionados_lz.xlsx")
+
+mapping_corr <- bitr(tabla_genes_correlacionados$SYMBOL,
+                     fromType = "SYMBOL",
+                     toType = "ENTREZID",
+                     OrgDb = org.Dm.eg.db)
+
+#Reactome
+reactome_res_corr <- enrichPathway(
+  gene = mapping_corr$ENTREZID,
+  organism = "fly",
+  pvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+if (!is.null(reactome_res_corr) && nrow(as.data.frame(reactome_res_corr)) > 0) {
+  tabla_reactome_corr <- as.data.frame(reactome_res_corr)[, c("ID", "Description", "GeneRatio", "pvalue", "geneID")]
+  print(tabla_reactome_corr)
+} else {
+  print("No se encontraron vías enriquecidas.")
+}
+
+#KEGG
+anotaciones_corr <- AnnotationDbi::select(
+  org.Dm.eg.db,
+  keys = mapping_corr$ENTREZID,
+  columns = c("PATH"),
+  keytype = "ENTREZID"
+)
+
+vias_corr <- anotaciones_corr %>% 
+  filter(!is.na(PATH)) %>% 
+  distinct(ENTREZID, PATH)
+
+all_pathways <- KEGGREST::keggList("pathway", "dme")
+tabla_pathways <- data.frame(
+  PATH = sub("path:dme", "", names(all_pathways)),
+  Name = as.character(all_pathways),
+  stringsAsFactors = FALSE
+)
+
+vias_con_nombre <- vias_corr %>%
+  left_join(tabla_pathways, by = "PATH")
+
+mapping_genes <- mapping_corr %>% dplyr::select(ENTREZID, SYMBOL)
+
+vias_full <- vias_con_nombre %>%
+  left_join(mapping_genes, by = "ENTREZID")
+
+tabla_vias_genes <- vias_full %>%
+  group_by(PATH, Name) %>%
+  summarise(Genes = paste(unique(SYMBOL), collapse = ", ")) %>%
+  ungroup()
+
+write.xlsx(tabla_vias_genes, file = "tabla_vias_KEGG_Correlacion_lz.xlsx")
+
+#Genes correlacionados a dome
+avg_expr_all <- AverageExpression(total_seurat, return.seurat = FALSE, slot = "data")
+head(avg_expr_all$RNA)
+dome_profile <- avg_expr_all$RNA["Hml", ]
+correlacion_dome <- apply(avg_expr_all$RNA, 1, function(x) cor(x, dome_profile, method = "pearson"))
+similar_genes_dome <- sort(correlacion_dome, decreasing = TRUE)
+
+genes_correlacionados_dome <- correlacion_dome[correlacion_dome >= 0.95]
+tabla_genes_correlacionados_dome <- data.frame(SYMBOL = names(genes_correlacionados_dome),Correlacion = as.numeric(genes_correlacionados_dome))
+tabla_genes_correlacionados_dome <- tabla_genes_correlacionados_dome[order(-tabla_genes_correlacionados_dome$Correlacion), ]
+
+write.xlsx(tabla_genes_correlacionados_dome, file = "tabla_genes_Hml.xlsx")
+
+#DotPlot para los distintos genes----
+
+genes_dotplot <- c("dome", "Lip4", "Cbs", "net", "Papss") 
+dot <- DotPlot(total_seurat, features = genes_dotplot) +
+  coord_flip() +
+  scale_color_gradientn(colors = c("yellow", "magenta")) +
+  scale_size(range = c(4, 6)) +  # Tamaño más notorio
+  labs(x = "Genes", y = "Subpoblación", color = "Mean", size = "Non-zero percent") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold"),
+    panel.grid = element_blank()
+  )
+
+ggsave("dotplot_genes.png", plot = dot, width = 6, height = 4, dpi = 300)
+
 #Subclusterización células cristal----
 cc_cells <- subset(total_seurat, idents = "CC")
 
@@ -194,6 +329,22 @@ new_idents <- Idents(cc_cells)
 levels(new_idents)
 levels(new_idents) <- c("iCC", "mCC")
 Idents(cc_cells) <- new_idents
+
+genes_dotplot_CC <- c("lz", "fok", "Elk", "St3", "fbp") 
+dotCC <- DotPlot(cc_cells, features = genes_dotplot_CC) +
+  coord_flip() +
+  scale_color_gradientn(colors = c("yellow", "magenta")) +
+  scale_size(range = c(4, 6)) +  # Tamaño más notorio
+  labs(x = "Genes", y = "Subpoblación", color = "Mean", size = "Non-zero percent") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold"),
+    panel.grid = element_blank()
+  )
+
+ggsave("dotplot_genes_CC.png", plot = dotCC, width = 6, height = 4, dpi = 300)
 
 genes_disponibles_cc <- rownames(GetAssayData(cc_cells, slot = "scale.data"))
 genes_cc_filtrados <- intersect(CC_hallmark_genes, genes_disponibles_cc)
@@ -232,6 +383,120 @@ png("heatmap_CC.png", width = 10, height = 8, units = "in", res = 300)
 draw(heatmap_cc)
 dev.off()
 
+
+#Ordenar heatmap CC según la expresión de genes----
+cc_cells <- subset(total_seurat, idents = "CC")
+
+cc_cells <- NormalizeData(cc_cells)
+cc_cells <- FindVariableFeatures(cc_cells, selection.method = "vst", nfeatures = 2000)
+cc_cells <- ScaleData(cc_cells)
+cc_cells <- RunPCA(cc_cells)
+
+cc_cells <- FindNeighbors(cc_cells, dims = 1:10)
+cc_cells <- FindClusters(cc_cells, resolution = 0.17)
+cc_cells <- RunTSNE(cc_cells, dims = 1:10)
+
+DimPlot(cc_cells, reduction = "tsne", label = TRUE) + ggtitle("Subcluster de células cristal (CC)")
+
+CC_hallmark_genes <- c("PPO1", "PPO2", "lz", "peb", "Hml")
+
+new_idents <- Idents(cc_cells)
+levels(new_idents)
+levels(new_idents) <- c("iCC", "mCC")
+Idents(cc_cells) <- new_idents
+
+genes_disponibles_cc <- rownames(GetAssayData(cc_cells, slot = "scale.data"))
+genes_cc_filtrados <- intersect(CC_hallmark_genes, genes_disponibles_cc)
+
+mat_cc <- GetAssayData(cc_cells, slot = "scale.data")[genes_cc_filtrados, ]
+mat_cc <- mat_cc[, order(Idents(cc_cells))]
+
+clusters_cc <- as.character(Idents(cc_cells)[colnames(mat_cc)])
+clusters_cc <- factor(clusters_cc, levels = c("iCC", "mCC"))
+cluster_colors_cc <- c(iCC = "#1f78b4", mCC = "#33a02c")
+
+#Según lz
+lz_expr <- GetAssayData(cc_cells, slot = "data")["lz", colnames(mat_cc)]
+cells_por_cluster <- split(names(lz_expr), clusters_cc)
+
+ordenado_por_lz <- unlist(lapply(cells_por_cluster, function(cells){
+  exprs <- lz_expr[cells]
+  cells[order(exprs)]
+}))
+
+mat_cc_ordenado <- mat_cc[, ordenado_por_lz]
+clusters_cc_ordenado <- factor(as.character(Idents(cc_cells)[ordenado_por_lz]), levels = c("iCC", "mCC"))
+table(clusters_cc_ordenado)
+levels(clusters_cc_ordenado)
+names(clusters_cc_ordenado) <- colnames(mat_cc_ordenado)
+
+top_anno_cc <- HeatmapAnnotation(
+  Cluster = clusters_cc_ordenado,
+  col = list(Cluster = cluster_colors_cc),
+  show_annotation_name = FALSE,
+  show_legend = FALSE
+)
+
+heatmap_cc <- Heatmap(
+  mat_cc_ordenado,
+  name = "Z-score",
+  top_annotation = top_anno_cc,
+  col = colorRamp2(c(-2, 0, 2), c("navy", "white", "firebrick3")),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+  row_names_side = "left",
+  column_split = clusters_cc_ordenado,
+  column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+  row_names_gp = gpar(fontsize = 10),
+  use_raster = FALSE
+)
+png("heatmap_CC_Ordenado_lz.png", width = 10, height = 8, units = "in", res = 300)
+draw(heatmap_cc)
+dev.off()
+
+#Según PPO1
+PPO1_expr <- GetAssayData(cc_cells, slot = "data")["PPO1", colnames(mat_cc)]
+cells_por_cluster <- split(names(PPO1_expr), clusters_cc)
+
+ordenado_por_PPO1 <- unlist(lapply(cells_por_cluster, function(cells){
+  exprs <- PPO1_expr[cells]
+  cells[order(exprs)]
+}))
+
+mat_cc_ordenado <- mat_cc[, ordenado_por_PPO1]
+clusters_cc_ordenado <- factor(as.character(Idents(cc_cells)[ordenado_por_PPO1]), levels = c("iCC", "mCC"))
+table(clusters_cc_ordenado)
+levels(clusters_cc_ordenado)
+names(clusters_cc_ordenado) <- colnames(mat_cc_ordenado)
+
+top_anno_cc <- HeatmapAnnotation(
+  Cluster = clusters_cc_ordenado,
+  col = list(Cluster = cluster_colors_cc),
+  show_annotation_name = FALSE,
+  show_legend = FALSE
+)
+
+heatmap_cc <- Heatmap(
+  mat_cc_ordenado,
+  name = "Z-score",
+  top_annotation = top_anno_cc,
+  col = colorRamp2(c(-2, 0, 2), c("navy", "white", "firebrick3")),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+  row_names_side = "left",
+  column_split = clusters_cc_ordenado,
+  column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+  row_names_gp = gpar(fontsize = 10),
+  use_raster = FALSE
+)
+png("heatmap_CC_Ordenado_PPO1.png", width = 10, height = 8, units = "in", res = 300)
+draw(heatmap_cc)
+dev.off()
+
 #Observar grupo de células en particular----
 genes_pobPrevia <- FetchData(total_seurat, vars = c("dome", "Tep4", "Hml"))
 cells_interes <- rownames(genes_pobPrevia)[
@@ -239,13 +504,25 @@ cells_interes <- rownames(genes_pobPrevia)[
   genes_pobPrevia$Tep4 > 0 &
   genes_pobPrevia$Hml == 0]
 
-total_seurat$marker_combo <- ifelse(colnames(total_seurat) %in% cells_interes, "Previa", "Otros")
+p10_Hml <- quantile(genes_pobPrevia$Hml, 0.10)
+p10_Tep4 <- quantile(genes_pobPrevia$Tep4, 0.10)
+
+ExistenciaPob <- rownames(genes_pobPrevia)[
+  genes_pobPrevia$dome > 0 &
+  genes_pobPrevia$Tep4 == 0 &
+  genes_pobPrevia$Hml <= p10_Hml]
+length(ExistenciaPob)
+
+total_seurat$marker_combo <- factor(
+  ifelse(colnames(total_seurat) %in% ExistenciaPob, "Interés", "Otros"),
+  levels = c("Otros", "Interés"))
+
 p <- DimPlot(
   total_seurat,
   group.by = "marker_combo",
   reduction = "tsne",
   pt.size = 0.4,
-  cols = c("lightgray", "red"))
+  cols = c("lightgray", "red")) + labs(title = "Población Dome+, Tep4 p50, Hml+")
 
 p + ggtitle("Ubicación de células dome+, Tep4+, Hml-")
 

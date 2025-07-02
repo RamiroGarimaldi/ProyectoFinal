@@ -8,6 +8,8 @@ library(enrichplot)
 library(ggplot2)
 library(dplyr)
 library(stringr)
+library(KEGGREST)
+library(ReactomePA)
 
 #Lectura de archivos----
 list.files("DatosCrudos")
@@ -264,6 +266,72 @@ Tabla_GOPrevia_interesvsprevia <- ego_previa_df %>%
   dplyr::select(Description, N_genes_enriquecidos, Count, p.adjust, Genes_representativos)
 
 write.csv(Tabla_GOPrevia_interesvsprevia, "Tabla_GOPrevia_interesvsprevia.csv", row.names = FALSE)
+
+#Genes pertenecientes a "Regulation of intracellular signal transduction"
+genes_Regulacion <- c(
+  "sgg","Mo25","sra","cact","Hipk","msn","CG42674","Myd88","Cdc37","Crag",
+  "CG12290","Atg1","RhoGEF3","Smurf","M1BP","Csk","wcy","Cka","Patronin","raw",
+  "Nup44A","Clbn","Dhx15","Dad","pll","dos","step","wrd","Cbl","aru",
+  "CG18659","alph","Sac1","Src42A","RhoGEF2","Pak","Sur-8","Stlk","Slmap","armi",
+  "Pde8","PDZ-GEF","key","Lst","LRR","PEK","Cul4","Pp2C1","AMPKalpha","CycD",
+  "sigmar","RhoGAP1A","jub","Kcmf1","spri","RagA-B","trbl","Pdk1","Mnn1","PRAS40",
+  "Egfr","Duba","conu","RtGEF","garz","rictor","Mer","Tnks","mbt","RhoGAP5A",
+  "Socs16D","hppy","Src64B","ex","Ced-12","CG4853","cnk","tefu","sl","CG5521",
+  "Rgl","Art4","CG15547","cno","Rlip","chico","uri","hpo","puc","trr",
+  "Tsc1","Lpt","put"
+)
+
+mapping <- bitr(genes_Regulacion, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Dm.eg.db)
+anotaciones <- AnnotationDbi::select(org.Dm.eg.db, keys = mapping$ENTREZID, 
+                      columns = c("GO", "ONTOLOGY", "PATH"), keytype = "ENTREZID")
+
+vias <- anotaciones %>% filter(!is.na(PATH)) %>% distinct(ENTREZID, PATH)
+print(vias)
+
+vias_unicas <- unique(vias$PATH)
+
+all_pathways <- keggList("pathway", "dme")
+tabla_pathways <- data.frame(
+  PATH = sub("dme", "", names(all_pathways)),
+  Name = as.character(all_pathways),
+  stringsAsFactors = FALSE
+)
+
+vias_con_nombre <- vias %>%
+  left_join(tabla_pathways, by = "PATH")
+
+print(vias_con_nombre)
+
+mapping_genes <- mapping %>% select(ENTREZID, SYMBOL)
+
+vias_full <- vias %>% 
+  left_join(vias_con_nombre %>% select(PATH, Name) %>% distinct(), by = "PATH")
+vias_full <- vias_full %>%
+  left_join(mapping_genes, by = "ENTREZID")
+
+tabla_vias_genes <- vias_full %>%
+  group_by(PATH, Name) %>%
+  summarise(Genes = paste(unique(SYMBOL), collapse = ", ")) %>%
+  ungroup()
+
+print(tabla_vias_genes)
+
+genes_mapeados <- unique(vias$ENTREZID)
+length(genes_mapeados)
+
+#Otra base de datos -- Reactome
+reactome_res <- enrichPathway(gene = mapping$ENTREZID,
+                              organism = "fly",
+                              pvalueCutoff = 0.05,
+                              readable = TRUE)
+
+if (!is.null(reactome_res) && nrow(as.data.frame(reactome_res)) > 0) {
+  print(as.data.frame(reactome_res)[, c("ID", "Description", "GeneRatio", "pvalue", "geneID")])
+} else {
+  print("No se encontraron vías enriquecidas con los parámetros dados.")
+}
+
+tabla_reactome <- as.data.frame(reactome_res)[, c("ID", "Description", "GeneRatio", "pvalue", "geneID")]
 
 #Agregar IDs faltantes
 mapped <- bitr(genes_top_interes, fromType="SYMBOL", toType="ENTREZID", OrgDb=org.Dm.eg.db)
