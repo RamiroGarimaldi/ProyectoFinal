@@ -1,3 +1,3 @@
-# ProyectoFinal
+# Proyecto Final de Carrera Garimaldi
 
-Acá dejo códigos y figuras importantes para el proyecto
+En este repositorio voy a dejar los distintos códigos y figuras generadas de cara al análisis scRNA-seq que forman parte de mi proyecto final de carrera de Bioingeniería
